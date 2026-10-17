@@ -686,7 +686,7 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None):
 PAPER_FILE = os.path.expanduser("~/paper_config.json")
 PAPER_DEFAULTS = {
     "on": True, "token": "", "chat_id": "", "offset": 0,
-    "init_bud": 1000.0, "bal": 1000.0, "lev": 5, "alloc": 0.2,
+    "init_bud": 300.0, "bal": 300.0, "lev": 7, "alloc": 0.2,
     "rr": 2.0, "pos": {}, "hist": [], "seen": []
 }
 PAPER_INLINE_MARKUP = {"inline_keyboard": [
@@ -711,11 +711,23 @@ def load_paper():
             print("가상매매 설정 파일 생성 실패:", e)
     except Exception as e:
         print("가상매매 설정 읽기 실패:", e)
-    # 환경변수가 있으면 파일에 저장된 토큰보다 우선 사용
     d["token"] = os.environ.get("PAPER_TELEGRAM_TOKEN", d.get("token", ""))
     d.setdefault("pos", {})
     d.setdefault("hist", [])
     d.setdefault("seen", [])
+    if d.get("cfg_v", 0) < 2:
+        d["cfg_v"] = 2
+        d["lev"] = 7
+        d["init_bud"] = 300.0
+        d["bal"] = 300.0
+        d["pos"] = {}
+        try:
+            save_paper(d)
+        except Exception as e:
+            print("가상매매 설정 저장 실패:", e)
+    alloc_vals = list(globals().get("PAPER_ALLOC", {}).values())
+    if alloc_vals:
+        d["alloc"] = max(alloc_vals)
     return d
 
 
@@ -951,10 +963,11 @@ def paper_open_position(symbol, tf, side, price, signal_key):
     p = load_paper()
     if not p.get("on", True) or price <= 0:
         return
+    if symbol not in PAPER_ALLOC:
+        return
     seen = p.setdefault("seen", [])
     if signal_key in seen:
         return
-    # 종목당 한 포지션만 유지. 반대 신호라면 기존 포지션을 현재가로 정리한 뒤 반전.
     existing = p.get("pos", {}).get(symbol)
     if existing and existing.get("side") == side:
         seen.append(signal_key); p["seen"] = seen[-500:]; save_paper(p)
@@ -963,11 +976,10 @@ def paper_open_position(symbol, tf, side, price, signal_key):
         paper_close_position(p, symbol, price, "반대 신호")
         p = load_paper()
     balance = float(p.get("bal", 1000.0))
-    margin = max(0.0, balance * float(p.get("alloc", .2)))
+    margin = max(0.0, balance * float(PAPER_ALLOC[symbol]))
     notional = margin * max(1.0, float(p.get("lev", 5)))
     if notional <= 0:
         return
-    # 기본 손절 0.5%, 익절은 설정된 RR(기본 2:1) 적용
     risk = 0.005
     direction = 1 if side == "long" else -1
     sl = price * (1 - risk) if direction == 1 else price * (1 + risk)
@@ -1333,43 +1345,7 @@ def check_all(cfg):
             if not s:
                 continue
 
-            if tf in ("1h", "4h", "12h", "1d") and len(s["candles"]) >= 31:
-                closed_candles = s["candles"][:-1]
-                closed = closed_candles[-1]
-                close_key = (sym, tf, closed["t"])
-                stream_key = (sym, tf)
-                if stream_key not in closed_candle_seen:
-                    closed_candle_seen.add(stream_key)
-                    mark_alerted(("closed",) + close_key)
-                elif ("closed",) + close_key not in alerted:
-                    mark_alerted(("closed",) + close_key)
-                    close_price = closed["c"]
-                    prev_price = closed_candles[-2]["c"]
-                    change = (close_price / prev_price - 1) * 100 if prev_price else 0
-                    closed_ser = {n: values[:-1] for n, values in s["ser"].items()}
-                    trend = trend_read(closed_candles, closed_ser)
-                    candle_icon = "🟢" if close_price >= closed["o"] else "🔴"
-                    close_time = datetime.fromtimestamp(
-                        (closed["t"] + {"1h": 3600000, "4h": 14400000,
-                                        "12h": 43200000, "1d": 86400000}[tf]) / 1000,
-                        KST
-                    ).strftime("%m/%d %H:%M")
-                    brief = (
-                        "🕯️ %s 마감 브리핑 | %s %s\n"
-                        "마감: %s KST\n"
-                        "%s 종가: %s (%+.2f%%)\n"
-                        "%s 추세 (%+d/5) · EMA 배열: %s\n"
-                        "EMA7 %s / EMA25 %s / EMA99 %s\n"
-                        "※ 마감 기준 참고용 요약이며 매매 신호 보장은 없어요."
-                    ) % (
-                        TF_LABEL[tf], sym, tf.upper(), close_time, candle_icon,
-                        "{:,.2f}".format(close_price), change,
-                        trend["icon"], trend["score"], trend["align"],
-                        "{:,.2f}".format(trend["e7"]),
-                        "{:,.2f}".format(trend["e25"]),
-                        "{:,.2f}".format(trend["e99"])
-                    )
-                    send_telegram(brief)
+            check_closed(s, sym, tf, cfg)
 
             for n, e in s["emas"].items():
                 side = e["side"]
@@ -1396,7 +1372,6 @@ def check_all(cfg):
                     body = ("%s이 EMA%d에 닿고 %s 중이에요.\n최근 %s 같은 신호 %d번째"
                             % (TF_LABEL[tf], n, "위로 올라가는" if up else "아래로 내려가는",
                                LOOK_LABEL[tf], count))
-                # 기존 봇에서 실제 알림으로 확정된 신호만 두 번째 봇의 가상매매에 전달
                 paper_open_position(sym, tf, side, float(s["price"]), "%s|%s|%s|%s|%s|%s" % (sym, tf, n, s["t"], side, int(rep)))
                 mark_alerted(key)
                 head = "%s | %s %s EMA%d\n%s" % (title, sym, tf.upper(), n, body)
@@ -2023,6 +1998,55 @@ def main():
         update_paper_positions()
         handle_paper_updates()
         handle_updates(POLL_SECONDS, cfg)
+
+
+PAPER_ALLOC = {"BTCUSDT": 0.5, "ETHUSDT": 0.5}
+
+
+def check_closed(s, sym, tf, cfg):
+    if tf not in ("1h", "4h", "12h", "1d") or len(s["candles"]) < 31:
+        return
+    closed_candles = s["candles"][:-1]
+    closed = closed_candles[-1]
+    close_key = (sym, tf, closed["t"])
+    stream_key = (sym, tf)
+    if stream_key not in closed_candle_seen:
+        closed_candle_seen.add(stream_key)
+        mark_alerted(("closed",) + close_key)
+        return
+    if ("closed",) + close_key in alerted:
+        return
+    mark_alerted(("closed",) + close_key)
+    close_price = closed["c"]
+    prev_price = closed_candles[-2]["c"]
+    change = (close_price / prev_price - 1) * 100 if prev_price else 0
+    closed_ser = {n: values[:-1] for n, values in s["ser"].items()}
+    trend = trend_read(closed_candles, closed_ser)
+    candle_icon = "🟢" if close_price >= closed["o"] else "🔴"
+    secs = {"1h": 3600000, "4h": 14400000, "12h": 43200000, "1d": 86400000}[tf]
+    close_time = datetime.fromtimestamp((closed["t"] + secs) / 1000, KST).strftime("%m/%d %H:%M")
+    brief = (
+        "🕯️ %s 마감 브리핑 | %s %s\n"
+        "마감: %s KST\n"
+        "%s 종가: %s (%+.2f%%)\n"
+        "%s 추세 (%+d/5) · EMA 배열: %s\n"
+        "EMA7 %s / EMA25 %s / EMA99 %s\n"
+        "※ 마감 기준 참고용 요약이며 매매 신호 보장은 없어요."
+    ) % (
+        TF_LABEL[tf], sym, tf.upper(), close_time, candle_icon,
+        "{:,.2f}".format(close_price), change,
+        trend["icon"], trend["score"], trend["align"],
+        "{:,.2f}".format(trend["e7"]),
+        "{:,.2f}".format(trend["e25"]),
+        "{:,.2f}".format(trend["e99"])
+    )
+    try:
+        png = draw_chart(closed_candles, closed_ser, N=FULL_N,
+                         show_fib=cfg.get("fib_on", True))
+        send_photo(png, brief, keyboard=True, chart_tf=tf)
+    except Exception as ex:
+        print("마감 차트 생성 실패:", ex)
+        send_telegram(brief)
 
 
 if __name__ == "__main__":
