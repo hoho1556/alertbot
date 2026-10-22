@@ -31,6 +31,8 @@ import zlib
 import struct
 from datetime import datetime, timezone, timedelta
 
+import threading
+
 import requests
 
 VERSION = "v3.36-paper (지정가 알람 + 5분 뒤 재알림)"
@@ -1445,6 +1447,8 @@ def check_sudden_moves(cfg):
 # ---------------- 지정가 알람 (도달 알림 -> 5분 뒤 재알림 + 가격차이) ----------------
 PRICE_ALERT_FILE = os.path.expanduser("~/price_alerts.json")
 PRICE_ALERT_FOLLOW_SEC = 300  # 첫 알림 후 재알림까지 걸리는 시간(초) = 5분
+PRICE_ALERT_LOOP_SEC = 5      # 지정가 확인 주기(초). 차트/알림 처리와 별도 스레드에서 돈다
+PRICE_ALERT_LOCK = threading.RLock()
 
 
 def load_price_alerts():
@@ -1464,6 +1468,11 @@ def save_price_alerts(items):
 
 
 def price_alert_command(word, args, cfg):
+    with PRICE_ALERT_LOCK:
+        return _price_alert_command(word, args, cfg)
+
+
+def _price_alert_command(word, args, cfg):
     """지정가 BTC 65000 / 지정가목록 / 지정가삭제 BTC 65000 (또는 전체)"""
     items = load_price_alerts()
     if word == "지정가목록":
@@ -1523,6 +1532,11 @@ def price_alert_command(word, args, cfg):
 
 
 def check_price_alerts():
+    with PRICE_ALERT_LOCK:
+        _check_price_alerts()
+
+
+def _check_price_alerts():
     items = load_price_alerts()
     if not items:
         return
@@ -1569,6 +1583,17 @@ def check_price_alerts():
             keep.append(a)
     if changed:
         save_price_alerts(keep)
+
+
+def price_alert_worker():
+    """메인 루프(차트 생성/긴 대기)와 무관하게 5초마다 지정가와 5분 뒤 재알림을 확인한다."""
+    print("지정가 알람 감시 스레드 시작")
+    while True:
+        try:
+            check_price_alerts()
+        except Exception as e:
+            print("지정가 알람 오류:", repr(e))
+        time.sleep(PRICE_ALERT_LOOP_SEC)
 
 
 # ---------------- 알림 ----------------
@@ -2277,6 +2302,7 @@ def main():
         "두 번째 봇은 자동 가상매매 전용이며 실제 주문을 보내지 않습니다.\n"
         "시간봉 버튼을 눌러도 키보드 자판이 올라오지 않습니다." % (VERSION, VERSION_FILE)
     )
+    threading.Thread(target=price_alert_worker, daemon=True).start()
     while True:
         cfg = load_cfg()
         try:
@@ -2284,10 +2310,6 @@ def main():
             check_all(cfg)
         except Exception as e:
             print("감시 오류:", e)
-        try:
-            check_price_alerts()
-        except Exception as e:
-            print("지정가 알람 오류:", e)
         update_paper_positions()
         handle_paper_updates()
         handle_updates(POLL_SECONDS, cfg)
