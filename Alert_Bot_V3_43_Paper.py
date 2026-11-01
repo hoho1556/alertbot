@@ -72,6 +72,7 @@ DEFAULTS = {
     "auto_zone_on": True,        # 이평선+피보나치+매물대 교차 분석으로 핵심 지지대·저항대·번지대를 지정봇(가격봇)으로 자동 알림
     "full_n": FULL_N,            # 수동 모드일 때 1번(큰 그림) 기본 봉 개수
     "zoom_n": ZOOM_N,            # 수동 모드일 때 2번(확대) 기본 봉 개수
+    "clean_chart_on": True,     # v3.43: 깔끔 차트 모드 (핵심 지지·저항·번지 라인만 굵게, 나머지 잡선 제거)
     "alerts_to_price_bot": True, # v3.43: EMA 터치 반등/거절(추세전환)·마감봉·급변 알람도 지정봇(가격봇)으로 전송
     "price_bot_token": "",       # 지정봇(가격봇) 토큰 수동 지정 시 사용 (비워두면 자동 감지)
     "price_bot_chat_id": "",     # 지정봇(가격봇) 채팅방 ID 수동 지정 시 사용 (비워두면 자동 감지)
@@ -287,11 +288,12 @@ def load_cfg():
     for k in ("min_count", "rep_on", "rep_touch_min", "rep_window", "update_url",
               "surge_on", "surge_change_pct", "surge_volume_mult", "fib_on", "zoom_on",
               "vol_on", "mtf_on", "ew_on", "dyn_bars_on", "auto_zone_on", "full_n", "zoom_n",
-              "price_bot_token", "price_bot_chat_id", "alerts_to_price_bot"):
+              "price_bot_token", "price_bot_chat_id", "alerts_to_price_bot", "clean_chart_on"):
         if k in raw:
             cfg[k] = raw[k]
 
     cfg["config_version"] = 343
+    _CHART_CLEAN["on"] = bool(cfg.get("clean_chart_on", True))
     if raw.get("config_version", 0) != 343:
         try:
             save_cfg(cfg)
@@ -470,6 +472,7 @@ def send_price_bot_photo(png, caption, cfg=None):
 
 # v3.43: 알람 라우팅 - 켜져 있는 동안 send_telegram/send_photo 가 알림봇 대신 지정봇(가격봇)으로 전송됨
 _ROUTE_PRICE = {"on": False, "cfg": None}
+_CHART_CLEAN = {"on": True}
 
 
 class route_to_price_bot(object):
@@ -1634,6 +1637,7 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None, show_v
     SUP_COL = (46, 213, 115)
     RES_COL = (255, 127, 80)
     BUNGEE_COL = (255, 71, 87)
+    clean = bool(_CHART_CLEAN.get("on", True))
 
     pix = bytearray(bytes(BG) * (W * H))
     row_stride = W * 3
@@ -1762,7 +1766,13 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None, show_v
     def Y(v):
         return int(B - (v - lo) / (top - lo) * (B - T))
 
-    poc = calc_poc_info(cs, len(cs)) if show_vol else None
+    poc = calc_poc_info(cs, len(cs)) if (show_vol and not clean) else None
+    zones_draw = list(extra_zones or [])
+    if clean and zones_draw:
+        _cur = cs[-1]["c"]
+        _ab = sorted([z for z in zones_draw if z["price"] >= _cur], key=lambda z: z["price"])[:2]
+        _be = sorted([z for z in zones_draw if z["price"] < _cur], key=lambda z: -z["price"])[:2]
+        zones_draw = _ab + _be
     if poc:
         yp_hi = Y(poc["high"])
         yp_lo = Y(poc["low"])
@@ -1776,7 +1786,7 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None, show_v
         ya, yb = sorted((yg_a, yg_b))
         rect(fx0, max(T, ya), R, min(B, yb), ZONE_BG)
 
-    for k in range(1, 5):
+    for k in (range(1, 5) if not clean else ()):
         gy = T + (B - T) * k // 5
         rect(L, gy, R, gy, GRID)
 
@@ -1792,14 +1802,15 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None, show_v
         yg_a = Y(fib["gz_a"])
         yg_b = Y(fib["gz_b"])
 
-        dashed_hline(L, R, fy0, FIB_START_COL, dash=3 * K, gap=3 * K, th=max(1, K - 1))
-        dashed_hline(L, R, fy1, FIB_START_COL, dash=3 * K, gap=3 * K, th=max(1, K - 1))
+        if not clean:
+            dashed_hline(L, R, fy0, FIB_START_COL, dash=3 * K, gap=3 * K, th=max(1, K - 1))
+            dashed_hline(L, R, fy1, FIB_START_COL, dash=3 * K, gap=3 * K, th=max(1, K - 1))
 
         if fib["retracing"]:
             dashed_hline(L, R + 4 * K, yg_a, FIB_382_COL, dash=6 * K, gap=3 * K, th=K)
             dashed_hline(L, R + 4 * K, yg_b, FIB_618_COL, dash=6 * K, gap=3 * K, th=K)
             lim_val = fib["500"] if fib.get("ew_wave") == "W4" else fib["786"]
-            if lo <= lim_val <= top:
+            if lo <= lim_val <= top and not clean:
                 dashed_hline(fx0, R, Y(lim_val), FIB_LIMIT_COL, dash=3 * K, gap=4 * K, th=max(1, K - 1))
 
         if fib.get("tp1_ext") and lo <= fib["tp1_ext"] <= top:
@@ -1807,7 +1818,9 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None, show_v
             dashed_hline(fx1, R + 4 * K, yt1, FIB_EXT_COL, dash=6 * K, gap=3 * K, th=K)
 
         ew_pivs = fib.get("ew_pivots") or []
-        if len(ew_pivs) >= 2:
+        if clean:
+            pass
+        elif len(ew_pivs) >= 2:
             for pi in range(len(ew_pivs) - 1):
                 px0 = int(L + (ew_pivs[pi]["idx"] + 0.5) * bw)
                 py0 = Y(ew_pivs[pi]["val"])
@@ -1817,11 +1830,15 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None, show_v
         else:
             dashed_line(fx0, fy0, fx1, fy1, FIB_TREND_COL, dash=5 * K, gap=3 * K, th=K)
 
-    if extra_zones:
-        for ez in extra_zones:
+    if zones_draw:
+        for ez in zones_draw:
             zp = ez.get("price", 0.0)
             if lo <= zp <= top:
                 zcol = BUNGEE_COL if ez["kind"] == "BUNGEE" else (SUP_COL if ez["kind"] == "SUP" else RES_COL)
+                if clean:
+                    _bh = max(2 * K, int(zp * 0.0012 / (top - lo) * (B - T)))
+                    _dim = tuple(int(zcol[i] * 0.22 + BG[i] * 0.78) for i in range(3))
+                    rect(L, Y(zp) - _bh, R, Y(zp) + _bh, _dim)
                 dashed_hline(L, R + 4 * K, Y(zp), zcol, dash=7 * K, gap=2 * K, th=K + 1)
 
     for k, c in enumerate(cs):
@@ -1882,14 +1899,15 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None, show_v
         yg_a = Y(fib["gz_a"])
         yg_b = Y(fib["gz_b"])
 
-        draw_circle(fx0, fy0, 5 * K, FIB_TREND_COL, th=K)
-        rect(fx0 - 2 * K, fy0 - 2 * K, fx0 + 2 * K, fy0 + 2 * K, FIB_TREND_COL)
-        draw_circle(fx1, fy1, 5 * K, WHITE, th=K)
-        rect(fx1 - 2 * K, fy1 - 2 * K, fx1 + 2 * K, fy1 + 2 * K, WHITE)
+        if not clean:
+            draw_circle(fx0, fy0, 5 * K, FIB_TREND_COL, th=K)
+            rect(fx0 - 2 * K, fy0 - 2 * K, fx0 + 2 * K, fy0 + 2 * K, FIB_TREND_COL)
+            draw_circle(fx1, fy1, 5 * K, WHITE, th=K)
+            rect(fx1 - 2 * K, fy1 - 2 * K, fx1 + 2 * K, fy1 + 2 * K, WHITE)
 
         ew_pivs = fib.get("ew_pivots") or []
         if ew_pivs:
-            for pv in ew_pivs:
+            for pv in (ew_pivs[-4:] if clean else ew_pivs):
                 px = int(L + (pv["idx"] + 0.5) * bw)
                 py = Y(pv["val"])
                 is_top = (pv["val"] >= cs[pv["idx"]]["h"] * 0.9999)
@@ -1897,41 +1915,42 @@ def draw_chart(candles, ser, hi=None, N=60, K=3, show_fib=True, tag=None, show_v
                 lbl_txt = "[%s]" % pv["lbl"]
                 draw_text(max(L, min(R - 22 * K, px - 8 * K)), max(T, min(B - 9 * K, ty_off)),
                           lbl_txt, FIB_EXT_COL if pv["lbl"] in ("3", "5", "E") else FIB_TREND_COL, scale=K)
-        else:
+        elif not clean:
             s_tag_y = fy0 + 8 * K if fib["mode"] == "up" else fy0 - 15 * K
             e_tag_y = fy1 - 15 * K if fib["mode"] == "up" else fy1 + 8 * K
             draw_text(max(L, min(R - 35 * K, fx0 - 14 * K)), max(T, min(B - 8 * K, s_tag_y)), "START", FIB_TREND_COL, scale=K)
             draw_text(max(L, min(R - 25 * K, fx1 - 10 * K)), max(T, min(B - 8 * K, e_tag_y)), "END", WHITE, scale=K)
 
-        labels = [
-            {"y": fy0, "text": "1.0(S) " + fmt_p(fib["start_val"]), "col": FIB_START_COL},
-            {"y": fy1, "text": "0.0(E) " + fmt_p(fib["end_val"]), "col": FIB_START_COL},
-            {"y": ly,  "text": "NOW " + fmt_p(cs[-1]["c"]), "col": WHITE},
-        ]
+        labels = [{"y": ly,  "text": "NOW " + fmt_p(cs[-1]["c"]), "col": WHITE}]
+        if not clean:
+            labels += [
+                {"y": fy0, "text": "1.0(S) " + fmt_p(fib["start_val"]), "col": FIB_START_COL},
+                {"y": fy1, "text": "0.0(E) " + fmt_p(fib["end_val"]), "col": FIB_START_COL},
+            ]
         if fib["retracing"]:
             if fib.get("ew_wave") == "W4":
                 labels.append({"y": yg_a, "text": "0.236 " + fmt_p(fib["236"]), "col": FIB_382_COL})
                 labels.append({"y": yg_b, "text": "0.382 " + fmt_p(fib["382"]), "col": FIB_618_COL})
-                if lo <= fib["500"] <= top:
+                if lo <= fib["500"] <= top and not clean:
                     labels.append({"y": Y(fib["500"]), "text": "0.5(X) " + fmt_p(fib["500"]), "col": FIB_LIMIT_COL})
             else:
                 labels.append({"y": yg_a, "text": "0.382 " + fmt_p(fib["382"]), "col": FIB_382_COL})
                 labels.append({"y": yg_b, "text": "0.618 " + fmt_p(fib["618"]), "col": FIB_618_COL})
-                if lo <= fib["786"] <= top:
+                if lo <= fib["786"] <= top and not clean:
                     labels.append({"y": Y(fib["786"]), "text": "0.786 " + fmt_p(fib["786"]), "col": FIB_LIMIT_COL})
         if fib.get("tp1_ext") and lo <= fib["tp1_ext"] <= top:
             labels.append({"y": Y(fib["tp1_ext"]), "text": "TGT " + fmt_p(fib["tp1_ext"]), "col": FIB_EXT_COL})
         if poc:
             labels.append({"y": Y(poc["price"]), "text": "POC " + fmt_p(poc["price"]), "col": POC_COL})
-        if extra_zones:
-            for ez in extra_zones:
+        if zones_draw:
+            for ez in zones_draw:
                 zp = ez.get("price", 0.0)
                 if lo <= zp <= top:
                     ztag = "BUNGEE " if ez["kind"] == "BUNGEE" else ("SUP " if ez["kind"] == "SUP" else "RES ")
                     zcol = BUNGEE_COL if ez["kind"] == "BUNGEE" else (SUP_COL if ez["kind"] == "SUP" else RES_COL)
                     labels.append({"y": Y(zp), "text": ztag + fmt_p(zp), "col": zcol})
         labels.sort(key=lambda item: item["y"])
-        min_gap = 11 * K
+        min_gap = (14 if clean else 11) * K
         for i in range(1, len(labels)):
             if labels[i]["y"] - labels[i - 1]["y"] < min_gap:
                 labels[i]["y"] = labels[i - 1]["y"] + min_gap
