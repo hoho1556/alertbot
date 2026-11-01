@@ -31,7 +31,7 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
-VERSION = "v3.43-paper (모든추세알람→지정봇·지정봇전용AI지지·번지대알람·유동봉개수·엘리어트파동·정밀피보나치·1초응답)"
+VERSION = "v3.43-paper (지정봇=내지정가·AI타점전용·깔끔차트·지정봇전용AI지지·번지대알람·유동봉개수·엘리어트파동·정밀피보나치·1초응답)"
 VERSION_FILE = os.path.basename(__file__) if "__file__" in globals() else "alert_bot_v3_43_paper.py"
 HOT_PATCH_ENABLED = True  # 텔레그램 채팅 "패치" 기능 (TELEGRAM_CHAT_ID 로 등록된 내 채팅방에서만 동작)
 FULL_N = 90   # 유동 모드가 꺼져 있을 때 1번째(큰 그림) 차트 기본 캔들 개수
@@ -73,7 +73,6 @@ DEFAULTS = {
     "full_n": FULL_N,            # 수동 모드일 때 1번(큰 그림) 기본 봉 개수
     "zoom_n": ZOOM_N,            # 수동 모드일 때 2번(확대) 기본 봉 개수
     "clean_chart_on": True,     # v3.43: 깔끔 차트 모드 (핵심 지지·저항·번지 라인만 굵게, 나머지 잡선 제거)
-    "alerts_to_price_bot": True, # v3.43: EMA 터치 반등/거절(추세전환)·마감봉·급변 알람도 지정봇(가격봇)으로 전송
     "price_bot_token": "",       # 지정봇(가격봇) 토큰 수동 지정 시 사용 (비워두면 자동 감지)
     "price_bot_chat_id": "",     # 지정봇(가격봇) 채팅방 ID 수동 지정 시 사용 (비워두면 자동 감지)
 }
@@ -288,7 +287,7 @@ def load_cfg():
     for k in ("min_count", "rep_on", "rep_touch_min", "rep_window", "update_url",
               "surge_on", "surge_change_pct", "surge_volume_mult", "fib_on", "zoom_on",
               "vol_on", "mtf_on", "ew_on", "dyn_bars_on", "auto_zone_on", "full_n", "zoom_n",
-              "price_bot_token", "price_bot_chat_id", "alerts_to_price_bot", "clean_chart_on"):
+              "price_bot_token", "price_bot_chat_id", "clean_chart_on"):
         if k in raw:
             cfg[k] = raw[k]
 
@@ -470,27 +469,8 @@ def send_price_bot_photo(png, caption, cfg=None):
         send_price_bot_msg(caption, cfg)
 
 
-# v3.43: 알람 라우팅 - 켜져 있는 동안 send_telegram/send_photo 가 알림봇 대신 지정봇(가격봇)으로 전송됨
-_ROUTE_PRICE = {"on": False, "cfg": None}
 _CHART_CLEAN = {"on": True}
 
-
-class route_to_price_bot(object):
-    """with route_to_price_bot(cfg): 블록 안의 모든 알람을 지정봇(가격봇) 채팅방으로 보낸다."""
-    def __init__(self, cfg):
-        self.cfg = cfg
-        self.prev = None
-
-    def __enter__(self):
-        self.prev = dict(_ROUTE_PRICE)
-        if self.cfg.get("alerts_to_price_bot", True):
-            _ROUTE_PRICE["on"] = True
-            _ROUTE_PRICE["cfg"] = self.cfg
-        return self
-
-    def __exit__(self, *a):
-        _ROUTE_PRICE.update(self.prev)
-        return False
 
 
 # ---------------- 시세/지표 (바이낸스 선물 + 스마트 캐시) ----------------
@@ -2730,8 +2710,6 @@ def tg(method, timeout=20, **kw):
 
 
 def send_telegram(text, keyboard=True, markup=None):
-    if _ROUTE_PRICE["on"]:
-        return send_price_bot_msg(text, _ROUTE_PRICE["cfg"])
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not os.environ.get("TELEGRAM_TOKEN") or not chat_id:
         print("[텔레그램 설정 없음]\n" + text)
@@ -2748,8 +2726,6 @@ def send_telegram(text, keyboard=True, markup=None):
 
 
 def send_photo(png, caption, keyboard=True, chart_tf=None, badge_drawn=False):
-    if _ROUTE_PRICE["on"]:
-        return send_price_bot_photo(png, caption, _ROUTE_PRICE["cfg"])
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not os.environ.get("TELEGRAM_TOKEN") or not chat_id:
         print("[텔레그램 설정 없음]\n" + caption)
@@ -4069,12 +4045,12 @@ def main():
         send_telegram("✅ 알림봇 연결 테스트 성공!\n버전: %s\n파일: %s" % (VERSION, VERSION_FILE))
         _tk, _ch = get_price_bot_creds(load_cfg())
         print("지정봇 토큰 감지:", "성공" if _tk else "실패", "/ 채팅방 ID:", _ch or "없음")
-        send_price_bot_msg("✅ 지정봇 연결 테스트 성공! 지지대·번지대·추세전환 알람이 이 방으로 옵니다.\n버전: %s" % VERSION, load_cfg())
+        send_price_bot_msg("✅ 지정봇 연결 테스트 성공! 내가 지정한 가격과 AI 자동감시 타점(지지·저항·번지대) 도달 알람만 이 방으로 옵니다.\n버전: %s" % VERSION, load_cfg())
         return
     single_instance()
     load_alert_state()
     cfg = load_cfg()
-    if cfg.get("alerts_to_price_bot", True) and not get_price_bot_creds(cfg)[0]:
+    if not get_price_bot_creds(cfg)[0]:
         print("⚠️ 지정봇 토큰을 자동으로 못 찾았어요. ~/alert_config.json 에 price_bot_token 을 넣어주세요. (그 전까지 알람은 전송되지 않아요)")
     print("실시간 감시 시작:", ", ".join(active_symbols(cfg)), "/", ", ".join(active_tfs(cfg)))
     paper = load_paper()
@@ -4115,9 +4091,8 @@ def main():
         if now - last_full_scan >= POLL_SECONDS:
             last_full_scan = now
             try:
-                with route_to_price_bot(cfg):
-                    check_sudden_moves(cfg)
-                    check_all(cfg)
+                check_sudden_moves(cfg)
+                check_all(cfg)
             except Exception as e:
                 print("감시 오류:", e)
 
